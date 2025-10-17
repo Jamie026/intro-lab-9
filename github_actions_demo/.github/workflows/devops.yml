@@ -1,0 +1,158 @@
+name: CI/CD Pipeline Avanzado
+run-name: "Pipeline ejecutado por ${{ github.actor }} en ${{ github.ref_name }}"
+
+on:
+    push:
+        branches: [main, develop]
+    pull_request:
+        branches: [main]
+    workflow_dispatch: # Permite ejecución manual
+
+env:
+    PYTHON_VERSION: "3.11"
+    NODE_VERSION: "18"
+
+jobs:
+    # Job de validación con matriz
+    test:
+        runs-on: ubuntu-latest
+        strategy:
+            matrix:
+                python-version: ["3.9", "3.10", "3.11"]
+        outputs:
+            build_tag: ${{ steps.meta.outputs.tag }}
+            test_results: ${{ steps.test.outputs.results }}
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup Python ${{ matrix.python-version }}
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ matrix.python-version }}
+
+            - name: Cache pip
+              uses: actions/cache@v4
+              with:
+                  path: ~/.cache/pip
+                  key: pip-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('requirements.txt') }}
+                  restore-keys: |
+                      pip-${{ runner.os }}-${{ matrix.python-version }}-
+                      pip-${{ runner.os }}-
+
+            - name: Install dependencies
+              run: |
+                  python -m pip install --upgrade pip
+                  pip install -r requirements.txt
+                  pip install pytest-cov  # Para coverage
+
+            - name: Run tests with coverage
+              id: test
+              run: |
+                  export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+                  pytest --cov=hello --cov-report=xml --cov-report=html
+                  echo "results=success" >> "$GITHUB_OUTPUT"
+
+            - name: Upload coverage reports
+              uses: actions/upload-artifact@v4
+              with:
+                  name: coverage-report-py${{ matrix.python-version }}
+                  path: htmlcov/
+
+            - name: Compute build tag
+              id: meta
+              run: |
+                  TS=$(date +%Y%m%d-%H%M%S)
+                  echo "tag=${TS}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+            - name: Save build info
+              run: |
+                  echo "Build tag: ${{ steps.meta.outputs.tag }}" > build-info.txt
+                  echo "Python version: ${{ matrix.python-version }}" >> build-info.txt
+                  echo "Commit: ${{ github.sha }}" >> build-info.txt
+                  echo "Branch: ${{ github.ref_name }}" >> build-info.txt
+
+            - name: Upload build info
+              uses: actions/upload-artifact@v4
+              with:
+                  name: build-info-py${{ matrix.python-version }}
+                  path: build-info.txt
+
+    # Job de calidad de código
+    lint:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ env.PYTHON_VERSION }}
+
+            - name: Install linting tools
+              run: |
+                  pip install flake8 black isort
+
+            - name: Run flake8
+              run: flake8 hello.py tests/
+
+            - name: Run black check
+              run: black --check hello.py tests/
+
+            - name: Run isort check
+              run: isort --check-only hello.py tests/
+
+    # Job de empaquetado
+    package:
+        needs: [test, lint] # Espera a que ambos terminen
+        runs-on: ubuntu-latest
+        if: github.ref == 'refs/heads/main' # Solo en main
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ env.PYTHON_VERSION }}
+
+            - name: Create package
+              run: |
+                  mkdir -p dist
+                  cp hello.py dist/
+                  cp requirements.txt dist/
+                  cp README.md dist/
+                  zip -r "dist/app-${{ needs.test.outputs.build_tag }}.zip" dist/
+
+            - name: Upload package
+              uses: actions/upload-artifact@v4
+              with:
+                  name: app-package
+                  path: dist/*.zip
+                  retention-days: 30
+
+    # Job de deployment (ejemplo)
+    deploy:
+        needs: [test, lint, package]
+        runs-on: ubuntu-latest
+        if: github.ref == 'refs/heads/main'
+        environment: production # Requiere aprobación manual
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Download package
+              uses: actions/download-artifact@v4
+              with:
+                  name: app-package
+                  path: dist/
+
+            - name: Deploy to production
+              run: |
+                  echo "Deploying version ${{ needs.test.outputs.build_tag }}"
+                  # Aquí irían los comandos reales de deployment
+                  # Por ejemplo: scp, kubectl, docker push, etc.
